@@ -134,58 +134,57 @@ R_train = sparse(train_u, train_m, train_r, size(R,1), size(R,2));
 fprintf('Observed ratings: %d, Train: %d, Test: %d\n', nObs, numel(train_r), numel(test_r));
 fprintf('Step 7 Done.\n');
 
-%% 8) Classification of users by genre (favorite-only based on training data)
-fprintf('Step 8: computing user-genre favorites on training data (favorite-only)...\n');
+%% Step 8 (modified): User × genre with shrinkage (smoothing)
+fprintf('Step 8: computing user-genre with shrinkage (smoothing)...\n');
 
-% compute user x genre average using training data (same as Step 6 process)
-Ugenre_train = R_train * double(G);                 % sums
-userGenreCounts_train = (R_train ~= 0) * double(G); % counts
-Ugenre_train = full(Ugenre_train);
-userGenreCounts_train = full(userGenreCounts_train);
-userGenreCounts_train = max(userGenreCounts_train, 1); % avoid zeros
-Ugenre_train = Ugenre_train ./ userGenreCounts_train; % avg rating per genre (train)
+% Sums and counts (use original train matrix)
+sums_genre = R_train * double(G);                 % numUsers x numGenres : sum of ratings per user-genre
+counts_genre = (R_train ~= 0) * double(G);        % numUsers x numGenres : counts per user-genre
+sums_genre = full(sums_genre);
+counts_genre = full(counts_genre);
 
-% define a "like" threshold (tuneable)
-like_threshold = 3.5;
+% shrinkage parameter alpha (tunable)
+alpha = 10;   % start with something like 5..50 depending on dataset size
 
-% For each user, find the genre with the maximum average
-[maxVals, maxIdx] = max(Ugenre_train, [], 2);   % maxVals: numUsers x 1, maxIdx: numUsers x 1
+% compute shrunk user-genre mean:
+% shrunk_mean = (sum + alpha * globalMean) / (count + alpha)
+% note: globalMean should be computed on training ratings
+globalMean = sum(train_r) / max(numel(train_r),1);
+Ugenre_shrunk = (sums_genre + alpha * globalMean) ./ (counts_genre + alpha);
 
-% Only keep users whose top genre average >= threshold
-validUsersMask = maxVals >= like_threshold;
+% For downstream use also keep a version of counts (used as weights)
+userGenreCounts_train = counts_genre;  % numUsers x numGenres
 
-% favorite genre index for users who pass threshold
-favIdx = maxIdx(validUsersMask);   % vector of genre indices (values in 1..numGenres)
-
-% Count favorites per genre (each user contributes at most 1)
-usersPerGenre_fav = zeros(1, numGenres);
-if ~isempty(favIdx)
-    genreCounts = accumarray(favIdx, 1, [numGenres, 1]); % numGenres x 1
-    usersPerGenre_fav = genreCounts';
-end
-
-% sort and show top genres by favorite counts
-[vals_fav, ord_fav] = sort(usersPerGenre_fav, 'descend');
-fprintf('Top favorite genres by number of users (threshold = %.1f):\n', like_threshold);
-for k = 1:min(10, numel(ord_fav))
-    fprintf('%2d) %-15s : %d users\n', k, genreList{ord_fav(k)}, vals_fav(k));
-end
-
-% Optional: show how many users didn't have any favorite (below threshold)
-nUsers = size(Ugenre_train,1);
-nNoFavorite = sum(~validUsersMask);
-fprintf('Users counted: %d (out of %d). Users with no favorite (below threshold): %d\n', sum(validUsersMask), nUsers, nNoFavorite);
-
+fprintf('Computed shrunk user-genre means (alpha = %g)\n', alpha);
 fprintf('Step 8 Done.\n');
 
-%% 9) Predict ratings for held-out test set (content-based using genre averages) and evaluate
-fprintf('Step 9: predicting test ratings and evaluating (RMSE, MAE)...\n');
+%% Step 9 (tempered biases + weighted genre): Predict with tempered user/movie biases + weighted genres + shrinkage
+fprintf('Step 9: predicting test ratings with tempered biases + weighted genres + shrinkage...\n');
 
-% user global mean (fallback)
-userSum = sum(R_train, 2);
-userCount = sum(R_train~=0, 2);
-userMean = full(userSum ./ max(userCount,1)); % numUsers x 1
-globalMean = sum(train_r) / max(numel(train_r),1);
+% hyperparams (tweak these)
+beta         = 0.5;   % weighting power for counts (0 => equal weights, 1 => linear)
+lambda_genre = 0.7;   % blend: how much to trust genre-based prediction vs baseline (0..1)
+lambda_user  = 0.5;   % scale for user bias (0..1)
+lambda_movie = 0.5;   % scale for movie bias (0..1)
+
+% precompute user/movie baseline stats (ensure full arrays)
+userCount = sum(R_train ~= 0, 2);                        % numUsers x 1 (sparse-friendly)
+userSum   = full(sum(R_train, 2));                       % numUsers x 1
+userMean  = userSum ./ max(userCount,1);                 % numUsers x 1
+userMean(userCount==0) = globalMean;                     % cold users -> global
+
+movieCount = full(sum(R_train ~= 0, 1));                 % 1 x numMovies
+movieSum   = full(sum(R_train, 1));                      % 1 x numMovies
+movieMeanVec = movieSum ./ max(movieCount,1);            % 1 x numMovies
+movieMeanVec(movieCount==0) = globalMean;                % cold movies -> global
+
+% baseline biases (full numeric)
+b_u_vec = full(userMean - globalMean);      % numUsers x 1
+b_m_vec = full(movieMeanVec - globalMean);  % 1 x numMovies
+
+% ensure Ugenre_shrunk and userGenreCounts_train are full numeric matrices
+Ugenre_shrunk_full = full(Ugenre_shrunk);
+userGenreCounts_full = full(userGenreCounts_train);
 
 nTest = numel(test_r);
 preds = zeros(nTest,1);
@@ -193,48 +192,51 @@ preds = zeros(nTest,1);
 for t = 1:nTest
     u = test_u(t);
     m = test_m(t);
-    % movie m corresponds to row m of G (because R columns align with selectedMovieIds/G rows)
+
+    % tempered baseline (global + scaled user bias + scaled movie bias)
+    b_u = 0; b_m = 0;
+    if userCount(u) > 0
+        b_u = lambda_user * b_u_vec(u);
+    end
+    b_m = lambda_movie * b_m_vec(m);
+
+    baseline = globalMean + b_u + b_m;
+
+    % genre-based prediction (weighted using counts^beta, values from Ugenre_shrunk)
     movieGenresIdx = find(G(m, :));
     if isempty(movieGenresIdx)
-        % no genre info: fallback to user mean or global mean
-        if userCount(u) > 0
-            p = userMean(u);
-        else
-            movieMean = mean(nonzeros(R_train(:, m)));
-            if isempty(movieMean)
-                p = globalMean;
-            else
-                p = movieMean;
-            end
-        end
+        % no genre info -> use baseline
+        p_genre = NaN;
     else
-        % predict as average of user's genre averages for that movie's genres
-        p = mean(Ugenre_train(u, movieGenresIdx));
-        % if the user has no ratings contributing to these genres, p may be NaN
-        if isnan(p)
-            if userCount(u) > 0
-                p = userMean(u);
-            else
-                movieMean = mean(nonzeros(R_train(:, m)));
-                if isempty(movieMean)
-                    p = globalMean;
-                else
-                    p = movieMean;
-                end
-            end
+        vals = Ugenre_shrunk_full(u, movieGenresIdx);                 % 1 x nGenresMovie
+        counts = userGenreCounts_full(u, movieGenresIdx);            % 1 x nGenresMovie
+        weights = counts .^ beta;
+        wsum = sum(weights);
+        if wsum > 0
+            p_genre = sum(weights .* vals) / wsum;
+        else
+            p_genre = NaN;
         end
     end
-    % clip to rating range (assumes 0.5 steps; adjust if needed)
+
+    % final prediction: baseline + lambda_genre * (genre_pred - globalMean)
+    if isnan(p_genre)
+        p = baseline;
+    else
+        p = baseline + lambda_genre * (p_genre - globalMean);
+    end
+
+    % clip to allowed rating range
     p = min(max(p, 0.5), 5.0);
     preds(t) = p;
 end
 
-% compute errors
+% compute errors & metrics
 errors = preds - double(test_r);
 rmse = sqrt(mean(errors.^2));
 mae = mean(abs(errors));
 
-fprintf('Prediction results on test set: RMSE = %.4f, MAE = %.4f\n', rmse, mae);
+fprintf('Prediction results (tempered biases + weighted+shrunk): RMSE = %.4f, MAE = %.4f\n', rmse, mae);
 
 % Accuracy within tolerance windows
 tol1 = 0.5;
@@ -244,17 +246,44 @@ acc_tol2 = mean(abs(errors) <= tol2);
 fprintf('Accuracy within ±0.5 stars: %.2f%%\n', 100*acc_tol1);
 fprintf('Accuracy within ±1.0 stars: %.2f%%\n', 100*acc_tol2);
 
-% (Optional) a small diagnostic: top bad predictions
+% Top worst predictions for diagnostics (as before)
 [~, worstIdx] = sort(abs(errors), 'descend');
 nShow = min(10, numel(worstIdx));
 fprintf('Top %d worst test predictions (abs error):\n', nShow);
 for i = 1:nShow
     t = worstIdx(i);
-    fprintf('%2d) user %d, movie %d, true=%.1f, pred=%.3f, absErr=%.3f\n', i, test_u(t), test_m(t), test_r(t), preds(t), abs(errors(t)));
+    fprintf('%2d) user %d, movie %d, true=%.1f, pred=%.3f, absErr=%.3f\n', ...
+        i, test_u(t), test_m(t), test_r(t), preds(t), abs(errors(t)));
+end
+
+% Print diagnostics for those worst cases
+for i = 1:nShow
+    t = worstIdx(i);
+    u = test_u(t);
+    m = test_m(t);
+
+    u_ratings = full(R_train(u, :));  % convert row to full numeric
+    m_ratings = full(R_train(:, m));  % convert column to full numeric
+
+    fprintf('User %d: #ratings=%d, mean=%.2f, std=%.2f\n', ...
+        u, nnz(u_ratings), mean(nonzeros(u_ratings)), std(nonzeros(u_ratings)));
+    fprintf('Movie %d: #ratings=%d, mean=%.2f, std=%.2f\n', ...
+        m, nnz(m_ratings), mean(nonzeros(m_ratings)), std(nonzeros(m_ratings)));
+
+    % show the genre-based components used (for debugging)
+    movieGenresIdx = find(G(m, :));
+    if ~isempty(movieGenresIdx)
+        vals = Ugenre_shrunk_full(u, movieGenresIdx);
+        counts = userGenreCounts_full(u, movieGenresIdx);
+        fprintf('  Genres used (idx): %s\n', mat2str(movieGenresIdx));
+        fprintf('  Genre vals: %s\n', mat2str(round(vals,3)));
+        fprintf('  Genre counts: %s\n', mat2str(counts));
+    else
+        fprintf('  No genre tags for movie %d\n', m);
+    end
 end
 
 fprintf('Step 9 Done.\n');
-
 
 %% Scaling notes (manual)
 % - For very large datasets (32M ratings): consider using datastore/tall arrays
