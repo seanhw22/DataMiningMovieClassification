@@ -26,7 +26,7 @@ fprintf('Loading CSV files...\n');
 ratings = readtable(ratingsFile);
 movies = readtable(moviesFile);
 % tags = readtable(tagsFile); % optional (not used directly below)
-fprintf('Step 1 Done.\n');
+fprintf('Step 1 Done. Load CSVs\n');
 
 %% 2) Map IDs to compact indices
 fprintf('Mapping IDs...\n');
@@ -35,12 +35,12 @@ fprintf('Mapping IDs...\n');
 numUsersAll = numel(uniqueUsers);
 numMoviesAll = numel(uniqueMovies);
 fprintf('Total users: %d, Total movies: %d, Total ratings: %d\n', numUsersAll, numMoviesAll, height(ratings));
-fprintf('Step 2 Done.\n');
+fprintf('Step 2 Done. Map IDs to compact indices\n');
 
 %% 3) Build sparse user-movie matrix (full dataset indices)
 fprintf('Building sparse rating matrix...\n');
 Rfull = sparse(userIdx, movieIdx, ratings.rating, numUsersAll, numMoviesAll);
-fprintf('Step 3 Done.\n');
+fprintf('Step 3 Done. Build sparse user-movie matrix (full dataset indices)\n');
 
 %% 4) Filter users & movies by activity
 userCounts = sum(Rfull~=0, 2);
@@ -58,12 +58,12 @@ if ~isinf(maxMovies) && numel(popularMovies) > maxMovies
 [~, ix2] = sort(movieCounts(popularMovies), 'descend');
 popularMovies = popularMovies(ix2(1:maxMovies));
 end
-fprintf('Step 4 Done.\n');
+fprintf('Step 4 Done. Filter users & movies by activity\n');
 
 %% 5) Subset rating matrix for analysis
 R = Rfull(activeUsers, popularMovies);
 clear Rfull userCounts movieCounts;
-fprintf('Step 5 Done.\n');
+fprintf('Step 5 Done. Subset rating matrix for analysis\n');
 
 %% 6) Dimensionality reduction via PCA on user-genre matrix
 fprintf('Step 6 (PCA) starting...\n');
@@ -104,7 +104,7 @@ U = userFeatures;
 S = diag(sqrt(latentVals(1:kLatent)));     % approximate scaling matrix 
 V = coeff(:,1:kLatent);                     % genre loadings
 
-fprintf('Step 6 Done.\n');
+fprintf('Step 6 Done. Dimensionality reduction via PCA on user-genre matrix\n');
 
 %% 7) Train/test split on observed ratings (hold-out) 
 fprintf('Step 7: creating train/test split...\n');
@@ -132,7 +132,7 @@ R_train = sparse(train_u, train_m, train_r, size(R,1), size(R,2));
 
 % quick sanity
 fprintf('Observed ratings: %d, Train: %d, Test: %d\n', nObs, numel(train_r), numel(test_r));
-fprintf('Step 7 Done.\n');
+fprintf('Step 7 Done. Train/test split on observed ratings (hold-out) \n');
 
 %% Step 8 (modified): User × genre with shrinkage (smoothing)
 fprintf('Step 8: computing user-genre with shrinkage (smoothing)...\n');
