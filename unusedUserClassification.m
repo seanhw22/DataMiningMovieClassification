@@ -158,7 +158,7 @@ userGenreCounts_train = counts_genre;  % numUsers x numGenres
 fprintf('Computed shrunk user-genre means (alpha = %g)\n', alpha);
 fprintf('Step 8 Done.\n');
 
-%% Step 9 (tempered biases + weighted genre): Predict with tempered user/movie biases + weighted genres + shrinkage
+%% Step 9 (tempered biases + weighted genre): Predict with tempered user/movie b.iases + weighted genres + shrinkage
 fprintf('Step 9: predicting test ratings with tempered biases + weighted genres + shrinkage...\n');
 
 % hyperparams (tweak these)
